@@ -3,7 +3,7 @@ import requests
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-import google.generativeai as genai
+from google import genai
 from datetime import datetime, timezone, timedelta
 
 # 환경 변수 설정
@@ -11,10 +11,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Gemini 모델 초기화
-genai.configure(api_key=GEMINI_API_KEY)
-# 최신 플래시 모델 사용
-model = genai.GenerativeModel('gemini-2.5-flash')
+# Gemini 클라이언트 초기화 (google-genai SDK)
+client = genai.Client(api_key=GEMINI_API_KEY)
+# 사용할 모델
+MODEL_NAME = "gemini-2.5-flash"
 
 def fetch_news(query, max_results=10, lang="ko", country="KR"):
     """Google News RSS 피드를 사용해 최신 뉴스를 가져온다 (API 키 불필요)."""
@@ -65,7 +65,10 @@ def summarize_news(news_items, today_str):
 뉴스 데이터:
 {news_items}
 """
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=prompt,
+    )
     return response.text
 
 def main():
