@@ -1,5 +1,6 @@
 import os
-import base64
+import re
+import json
 import requests
 import urllib.parse
 import urllib.request
@@ -17,50 +18,69 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # 사용할 모델
 MODEL_NAME = "gemini-2.5-flash"
 
+# 공통 HTTP 헤더
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    )
+}
+
 
 def resolve_google_news_url(google_url, timeout=15):
     """Google News RSS 리다이렉트 링크를 실제 기사 원본 URL로 변환한다.
 
-    1) URL의 base64 인코딩 부분을 디코딩해 원본 URL 추출 시도
-    2) 실패 시 HTTP 요청으로 최종 리다이렉트 URL 추적
-    3) 모두 실패하면 원본 google_url 그대로 반환(fallback)
+    Google News의 batchexecute API를 호출하여 토큰을 실제 URL로 해독한다.
+    실패하면 원본 google_url 그대로 반환(fallback)한다.
     """
     if not google_url or "news.google.com" not in google_url:
         return google_url
 
-    # 1) base64 디코딩 시도
     try:
-        part = google_url.split("/articles/")[1].split("?")[0]
-        padded = part + "=" * (-len(part) % 4)
-        raw = base64.urlsafe_b64decode(padded)
-        text = raw.decode("latin-1", errors="ignore")
-        idx = text.find("http")
-        if idx != -1:
-            url_part = text[idx:]
-            cleaned = []
-            for ch in url_part:
-                o = ord(ch)
-                if 0x20 < o < 0x7f:
-                    cleaned.append(ch)
-                else:
-                    break
-            real = "".join(cleaned)
-            if real.startswith("http") and "google.com" not in real:
-                return real
-    except Exception:
-        pass
+        # 1) 토큰 추출
+        token = google_url.split("/articles/")[1].split("?")[0]
 
-    # 2) HTTP 리다이렉트 추적
-    try:
-        req = urllib.request.Request(google_url, headers={"User-Agent": "Mozilla/5.0"})
+        # 2) 기사 페이지에서 서명(signature)과 타임스탬프 획득
+        art_url = "https://news.google.com/rss/articles/" + token
+        req = urllib.request.Request(art_url, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            final_url = resp.geturl()
-            if final_url and "news.google.com" not in final_url:
-                return final_url
-    except Exception:
-        pass
+            html = resp.read().decode("utf-8", errors="ignore")
 
-    # 3) fallback
+        sig_m = re.search(r'data-n-a-sg="([^"]+)"', html)
+        ts_m = re.search(r'data-n-a-ts="([^"]+)"', html)
+        if not sig_m or not ts_m:
+            return google_url
+        sig = sig_m.group(1)
+        ts = ts_m.group(1)
+
+        # 3) batchexecute 호출로 실제 URL 해독
+        inner = json.dumps([
+            "garturlreq",
+            [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1,
+              None, None, None, None, None, 0, 1],
+             "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
+            token, ts, sig
+        ])
+        freq = json.dumps([[["Fbv4je", inner, None, "generic"]]])
+        data = urllib.parse.urlencode({"f.req": freq}).encode("utf-8")
+        be_url = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+        be_req = urllib.request.Request(
+            be_url, data=data,
+            headers={**_HEADERS,
+                     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}
+        )
+        with urllib.request.urlopen(be_req, timeout=timeout) as be_resp:
+            be_text = be_resp.read().decode("utf-8", errors="ignore")
+
+        # 응답에서 실제 URL 추출
+        m = re.search(r'(https?://[^"\\]+)', be_text.split("Fbv4je")[-1] if "Fbv4je" in be_text else be_text)
+        if m:
+            real = m.group(1)
+            if "news.google.com" not in real:
+                return real
+    except Exception as e:
+        print(f"URL 변환 실패(fallback 사용): {e}")
+
     return google_url
 
 
@@ -73,7 +93,7 @@ def fetch_news(query, max_results=10, lang="ko", country="KR"):
         f"&hl={lang}&gl={country}&ceid={country}:{lang}"
     )
     try:
-        req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(rss_url, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=20) as resp:
             xml_data = resp.read()
         root = ET.fromstring(xml_data)
